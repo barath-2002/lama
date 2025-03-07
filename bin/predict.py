@@ -6,7 +6,6 @@
 #       indir=<path to input data> \
 #       outdir=<where to store predicts>
 
-
 import logging
 import os
 import sys
@@ -14,8 +13,6 @@ import traceback
 
 from saicinpainting.evaluation.utils import move_to_device
 from saicinpainting.evaluation.refinement import refine_predict
-
-# Limit CPU threading (ensures GPU utilization)
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['OPENBLAS_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
@@ -37,19 +34,15 @@ from saicinpainting.utils import register_debug_signal_handlers
 
 LOGGER = logging.getLogger(__name__)
 
+
 @hydra.main(config_path='../configs/prediction', config_name='default.yaml')
 def main(predict_config: OmegaConf):
     try:
         if sys.platform != 'win32':
-            register_debug_signal_handlers()  # kill -10 <pid> will dump traceback
+            register_debug_signal_handlers()  # kill -10 <pid> will result in traceback dumped into log
 
-        # ✅ Force GPU Usage
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-            LOGGER.info("✅ Running on GPU")
-        else:
-            device = torch.device("cpu")
-            LOGGER.warning("❌ CUDA not available, running on CPU")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
         train_config_path = os.path.join(predict_config.model.path, 'config.yaml')
         with open(train_config_path, 'r') as f:
@@ -60,20 +53,19 @@ def main(predict_config: OmegaConf):
 
         out_ext = predict_config.get('out_ext', '.png')
 
-        checkpoint_path = os.path.join(
-            predict_config.model.path, 'models', predict_config.model.checkpoint
-        )
-
-        # ✅ Load model directly on GPU
+        checkpoint_path = os.path.join(predict_config.model.path, 
+                                       'models', 
+                                       predict_config.model.checkpoint)
         model = load_checkpoint(train_config, checkpoint_path, strict=False, map_location=device)
-        model.to(device)  # Move model to GPU
+
         model.freeze()
+        if not predict_config.get('refine', False):
+            model.to(device)
 
         if not predict_config.indir.endswith('/'):
             predict_config.indir += '/'
 
         dataset = make_default_val_dataset(predict_config.indir, **predict_config.dataset)
-
         for img_i in tqdm.trange(len(dataset)):
             mask_fname = dataset.mask_filenames[img_i]
             cur_out_fname = os.path.join(
@@ -81,21 +73,23 @@ def main(predict_config: OmegaConf):
                 os.path.splitext(mask_fname[len(predict_config.indir):])[0] + out_ext
             )
             os.makedirs(os.path.dirname(cur_out_fname), exist_ok=True)
-
             batch = default_collate([dataset[img_i]])
-
-            # ✅ Move batch to GPU before processing
-            batch = move_to_device(batch, device)
-            batch['mask'] = (batch['mask'] > 0).to(device)
-
-            with torch.no_grad():
-                batch = model(batch)  # Runs inference on GPU
-                cur_res = batch[predict_config.out_key][0].permute(1, 2, 0).detach().cpu().numpy()
-                unpad_to_size = batch.get('unpad_to_size', None)
-
-                if unpad_to_size is not None:
-                    orig_height, orig_width = unpad_to_size
-                    cur_res = cur_res[:orig_height, :orig_width]
+            if predict_config.get('refine', False):
+                assert 'unpad_to_size' in batch, "Unpadded size is required for the refinement"
+                # image unpadding is taken care of in the refiner, so that output image
+                # is same size as the input image
+                cur_res = refine_predict(batch, model, **predict_config.refiner)
+                cur_res = cur_res[0].permute(1,2,0).detach().cpu().numpy()
+            else:
+                with torch.no_grad():
+                    batch = move_to_device(batch, device)
+                    batch['mask'] = (batch['mask'] > 0).to(device)
+                    batch = model(batch)                    
+                    cur_res = batch[predict_config.out_key][0].permute(1, 2, 0).detach().cpu().numpy()
+                    unpad_to_size = batch.get('unpad_to_size', None)
+                    if unpad_to_size is not None:
+                        orig_height, orig_width = unpad_to_size
+                        cur_res = cur_res[:orig_height, :orig_width]
 
             cur_res = np.clip(cur_res * 255, 0, 255).astype('uint8')
             cur_res = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
