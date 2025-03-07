@@ -83,7 +83,7 @@ def main(predict_config: OmegaConf):
             else:
                 with torch.no_grad():
                     batch = move_to_device(batch, device)
-                    batch['mask'] = (batch['mask'] > 0).to(device)
+                    batch['mask'] = (~batch['mask']).float().to(device)  # ✅ Fixes bool issue
                     batch = model(batch)                    
                     cur_res = batch[predict_config.out_key][0].permute(1, 2, 0).detach().cpu().numpy()
                     unpad_to_size = batch.get('unpad_to_size', None)
