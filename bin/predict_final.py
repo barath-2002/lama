@@ -32,7 +32,8 @@ class LaMaModel:
         """Loads the model ONCE and stores it for reuse."""
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model_path = model_path
-        self.checkpoint_path = os.path.join(model_path, "models", checkpoint)
+        self.checkpoint_path = os.path.join(model_path, checkpoint) 
+
 
         # Load config
         train_config_path = os.path.join(model_path, "config.yaml")
