@@ -18,17 +18,21 @@ from saicinpainting.training.trainers import load_checkpoint
 
 LOGGER = logging.getLogger(__name__)
 
-# ✅ Global model variable (Singleton)
-model = None
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# ✅ Singleton Model Class (Loads Model Once)
+class LaMaModel:
+    _instance = None
 
-def load_model():
-    """Loads the inpainting model once and keeps it in memory."""
-    global model
-    if model is None:
-        LOGGER.info("🚀 Loading model...")
-        model_path = "/app/big-lama"
-        checkpoint_path = f"{model_path}/fine-tuned_lama.ckpt"
+    def __new__(cls, model_path="/app/big-lama", checkpoint="fine-tuned_lama.ckpt"):
+        if cls._instance is None:
+            cls._instance = super(LaMaModel, cls).__new__(cls)
+            cls._instance._load_model(model_path, checkpoint)
+        return cls._instance
+
+    def _load_model(self, model_path, checkpoint):
+        """Loads the model ONCE and stores it for reuse."""
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model_path = model_path
+        self.checkpoint_path = os.path.join(model_path, "models", checkpoint)
 
         # Load config
         train_config_path = os.path.join(model_path, "config.yaml")
@@ -38,46 +42,52 @@ def load_model():
         train_config.training_model.predict_only = True
         train_config.visualizer.kind = "noop"
 
-        # Load model once
-        model = load_checkpoint(train_config, checkpoint_path, strict=False, map_location=device)
-        model.to(device)
-        model.freeze()
-        LOGGER.info("✅ Model loaded successfully.")
+        # Load model ONCE
+        self.model = load_checkpoint(train_config, self.checkpoint_path, strict=False, map_location=self.device)
+        self.model.to(self.device)
+        self.model.freeze()
+        LOGGER.info("✅ LaMa Model Loaded Once and Ready!")
 
-def predict_image(image_path, mask_path, output_path="/app/outputs/result.png"):
-    """Runs prediction on a single image using the loaded model."""
-    try:
-        # Ensure model is loaded
-        load_model()
+    def predict(self, image_path, mask_path, output_path="/app/outputs/image_mask.png"):
+        """Runs inference on a single image."""
+        batch = self._prepare_input(image_path, mask_path)
 
-        # ✅ Prepare input
-        batch = _prepare_input(image_path, mask_path)
-
-        # ✅ Run inference
         with torch.no_grad():
-            batch = model(batch)
+            batch = self.model(batch)
             cur_res = batch["inpainted"][0].permute(1, 2, 0).detach().cpu().numpy()
 
-        # ✅ Save output image
         cur_res = np.clip(cur_res * 255, 0, 255).astype("uint8")
         cur_res = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
         cv2.imwrite(output_path, cur_res)
-
         return output_path
-    except Exception as ex:
-        LOGGER.critical(f'Prediction failed due to {ex}:\n{traceback.format_exc()}')
-        return None
 
-def _prepare_input(image_path, mask_path):
-    """Prepares input image and mask as tensors."""
-    image = cv2.imread(image_path)
-    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+    def _prepare_input(self, image_path, mask_path):
+        """Prepares input image and mask as tensors."""
+        image = cv2.imread(image_path)
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
 
-    image = torch.tensor(image).permute(2, 0, 1).float() / 255.0
-    mask = torch.tensor(mask).unsqueeze(0).float()
+        image = torch.tensor(image).permute(2, 0, 1).float() / 255.0
+        mask = torch.tensor(mask).unsqueeze(0).float()
 
-    batch = default_collate([{"image": image, "mask": mask}])
-    batch = move_to_device(batch, device)
-    batch["mask"] = ((batch["mask"] > 0)).float().to(device)
+        batch = default_collate([{"image": image, "mask": mask}])
+        batch = move_to_device(batch, self.device)
+        batch["mask"] = ((batch["mask"] > 0)).float().to(self.device)
 
-    return batch
+        return batch
+
+
+if __name__ == "__main__":
+    LOGGER.info("🚀 Starting LaMa Inpainting Service...")
+
+    # ✅ Load Model ONCE
+    model = LaMaModel()
+
+    # ✅ Keep Listening for Requests
+    for line in sys.stdin:
+        try:
+            image_path, mask_path = line.strip().split()
+            LOGGER.info(f"Processing: {image_path}, {mask_path}")
+            model.predict(image_path, mask_path)
+            LOGGER.info("✅ Processing complete.")
+        except Exception as ex:
+            LOGGER.error(f"❌ Error: {ex}\n{traceback.format_exc()}")
