@@ -32,7 +32,7 @@ class LaMaModel:
         train_config.visualizer.kind = 'noop'
 
         # Load model checkpoint
-        checkpoint_path = os.path.join(model_path, 'models', checkpoint_name)
+        checkpoint_path = os.path.join(model_path, checkpoint_name)
         self.model = load_checkpoint(train_config, checkpoint_path, strict=False, map_location=self.device)
         self.model.freeze().to(self.device)
     
