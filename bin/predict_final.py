@@ -54,11 +54,15 @@ class LaMaModel:
         # Ensure image and mask are the same size
         H, W, _ = image.shape
         mask = cv2.resize(mask, (W, H), interpolation=cv2.INTER_NEAREST)  # Ensure same dimensions
-
+        
         # Convert image & mask to float32 for consistency
         image = image.astype(np.float32)
         mask = mask.astype(np.float32)
 
+        # Ensure the mask has 3 dimensions (H, W, 1)
+        if len(mask.shape) == 2:
+            mask = np.expand_dims(mask, axis=-1)  # Convert (H, W) -> (H, W, 1)
+            
         # Convert image & mask to PyTorch tensors (ensuring correct format)
         batch = {
             'image': torch.from_numpy(image).permute(2, 0, 1).float().unsqueeze(0).to(self.device),  # (1, 3, H, W)
