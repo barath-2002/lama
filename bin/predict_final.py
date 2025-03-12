@@ -59,10 +59,10 @@ class LaMaModel:
         image = image.astype(np.float32)
         mask = mask.astype(np.float32)
 
-        # Send raw NumPy arrays directly to the model (no tensor conversion)
+        # Convert image & mask to PyTorch tensors (ensuring correct format)
         batch = {
-            'image': image,  # Send raw NumPy array
-            'mask': mask,  # Send raw NumPy array
+            'image': torch.from_numpy(image).permute(2, 0, 1).float().unsqueeze(0).to(self.device),  # (1, 3, H, W)
+            'mask': torch.from_numpy(mask).permute(2, 0, 1).float().unsqueeze(0).to(self.device),  # (1, 3, H, W)
         }
 
         with torch.no_grad():
