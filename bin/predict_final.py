@@ -47,6 +47,8 @@ class LaMaModel:
 
         self.model.to(self.device)  # Move model to GPU/CPU
         print("✅ Model loaded successfully!")
+        # Store output key (inpainted result)
+        self.out_key = train_config.evaluator.inpainted_key if "evaluator" in train_config else "inpainted"
 
     def predict_image(self, image, mask):
         """Run the inpainting model on the given image and mask, ensuring they match in size."""
