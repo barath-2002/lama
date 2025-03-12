@@ -32,13 +32,12 @@ class LaMaModel:
         """Loads the model ONCE and stores it for reuse."""
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model_path = model_path
-        self.checkpoint_path = os.path.join(model_path, checkpoint) 
+        self.checkpoint_path = os.path.join(model_path, checkpoint)
 
-
-        # Load config
+        # Load config correctly
         train_config_path = os.path.join(model_path, "config.yaml")
         with open(train_config_path, "r") as f:
-            train_config = OmegaConf.load(f)
+            train_config = OmegaConf.create(yaml.safe_load(f))
 
         train_config.training_model.predict_only = True
         train_config.visualizer.kind = "noop"
@@ -49,13 +48,21 @@ class LaMaModel:
         self.model.freeze()
         LOGGER.info("✅ LaMa Model Loaded Once and Ready!")
 
-    def predict(self, image_path, mask_path, output_path="/app/outputs/image_mask.png"):
+    def predict(self, image_path, mask_path, output_path="/app/outputs/image_mask.png", refine=False):
         """Runs inference on a single image."""
         batch = self._prepare_input(image_path, mask_path)
 
         with torch.no_grad():
-            batch = self.model(batch)
-            cur_res = batch["inpainted"][0].permute(1, 2, 0).detach().cpu().numpy()
+            batch = move_to_device(batch, self.device)
+            batch["mask"] = (batch["mask"] > 0).float().to(self.device)
+
+            if refine:
+                assert "unpad_to_size" in batch, "Unpadded size is required for refinement"
+                cur_res = refine_predict(batch, self.model)
+                cur_res = cur_res[0].permute(1, 2, 0).detach().cpu().numpy()
+            else:
+                batch = self.model(batch)
+                cur_res = batch["inpainted"][0].permute(1, 2, 0).detach().cpu().numpy()
 
         cur_res = np.clip(cur_res * 255, 0, 255).astype("uint8")
         cur_res = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
@@ -67,13 +74,17 @@ class LaMaModel:
         image = cv2.imread(image_path)
         mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
 
-        image = torch.tensor(image).permute(2, 0, 1).float() / 255.0
-        mask = torch.tensor(mask).unsqueeze(0).float()
+        if image is None or mask is None:
+            raise ValueError(f"Error loading image or mask: {image_path}, {mask_path}")
+
+        # Convert image to RGB
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # Convert to torch tensors
+        image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1) / 255.0
+        mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)
 
         batch = default_collate([{"image": image, "mask": mask}])
-        batch = move_to_device(batch, self.device)
-        batch["mask"] = ((batch["mask"] > 0)).float().to(self.device)
-
         return batch
 
 
