@@ -8,13 +8,6 @@ from omegaconf import OmegaConf
 from saicinpainting.evaluation.utils import move_to_device
 from saicinpainting.training.trainers import load_checkpoint
 
-# Disable threading optimizations
-os.environ['OMP_NUM_THREADS'] = '1'
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
-os.environ['MKL_NUM_THREADS'] = '1'
-os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
-os.environ['NUMEXPR_NUM_THREADS'] = '1'
-
 LOGGER = logging.getLogger(__name__)
 
 class LaMaModel:
@@ -25,17 +18,30 @@ class LaMaModel:
 
         # Load model configuration
         config_path = os.path.join(model_path, 'config.yaml')
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"❌ Config file missing: {config_path}")
+
+        checkpoint_path = os.path.join(model_path, checkpoint_name)
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"❌ Checkpoint missing: {checkpoint_path}")
+
+        print(f"🔍 Loading model from: {checkpoint_path} on {self.device}")
+
         with open(config_path, 'r') as f:
             train_config = OmegaConf.create(yaml.safe_load(f))
-        
+
         train_config.training_model.predict_only = True
         train_config.visualizer.kind = 'noop'
 
         # Load model checkpoint
-        checkpoint_path = os.path.join(model_path, checkpoint_name)
         self.model = load_checkpoint(train_config, checkpoint_path, strict=False, map_location=self.device)
-        self.model.freeze().to(self.device)
-    
+        if self.model is None:
+            raise RuntimeError("❌ Model failed to load!")
+
+        self.model.to(self.device)  # No freeze()
+
+        print("✅ Model loaded successfully!")
+
     def predict_image(self, image, mask):
         """Run the inpainting model on the given image and mask."""
 
