@@ -49,44 +49,51 @@ class LaMaModel:
         print("✅ Model loaded successfully!")
 
     def predict_image(self, image, mask):
-        """Run the inpainting model on the given image and mask, treating both the same way."""
+        """Run the inpainting model on the given image and mask, ensuring they match in size."""
 
         # Ensure image and mask are the same size
         H, W, _ = image.shape
         mask = cv2.resize(mask, (W, H), interpolation=cv2.INTER_NEAREST)  # Ensure same dimensions
-        
+
         # Convert image & mask to float32 for consistency
         image = image.astype(np.float32)
         mask = mask.astype(np.float32)
 
-        # Ensure the mask has 3 dimensions (H, W, 1)
+        # Ensure the mask has 3 dimensions (H, W, 1) like the image
         if len(mask.shape) == 2:
             mask = np.expand_dims(mask, axis=-1)  # Convert (H, W) -> (H, W, 1)
-            
-        # Convert image & mask to PyTorch tensors (ensuring correct format)
+
+        # Convert image & mask to PyTorch tensors
+        image_tensor = torch.from_numpy(image).permute(2, 0, 1).float().unsqueeze(0).to(self.device)  # (1, 3, H, W)
+        mask_tensor = torch.from_numpy(mask).permute(2, 0, 1).float().unsqueeze(0).to(self.device)  # (1, 1, H, W)
+
+        # Ensure both tensors have the same shape before passing to the model
+        if image_tensor.shape != mask_tensor.shape:
+            raise ValueError(f"❌ Shape mismatch: Image {image_tensor.shape}, Mask {mask_tensor.shape}")
+
         batch = {
-            'image': torch.from_numpy(image).permute(2, 0, 1).float().unsqueeze(0).to(self.device),  # (1, 3, H, W)
-            'mask': torch.from_numpy(mask).permute(2, 0, 1).float().unsqueeze(0).to(self.device),  # (1, 3, H, W)
+            'image': image_tensor,
+            'mask': mask_tensor,
         }
 
         with torch.no_grad():
             batch = move_to_device(batch, self.device)  # Move to GPU/CPU
+            batch['mask'] = ((batch['mask'] > 0)).float().to(self.device)  # Ensure correct mask processing
             batch = self.model(batch)  # Run inference
 
-            cur_res = batch['inpainted'][0]  # Extract inpainted result
+            # Get the output key dynamically
+            cur_res = batch[self.out_key][0].permute(1, 2, 0).detach().cpu().numpy()
 
-            # If the result is a PyTorch tensor, convert it back to NumPy
-            if isinstance(cur_res, torch.Tensor):
-                cur_res = cur_res.permute(1, 2, 0).detach().cpu().numpy()
-
+            # Handle unpadding if needed
             unpad_to_size = batch.get('unpad_to_size', None)
             if unpad_to_size is not None:
                 orig_height, orig_width = unpad_to_size
                 cur_res = cur_res[:orig_height, :orig_width]
 
         # Ensure correct scaling and format
-        cur_res = (cur_res * 255).astype(np.uint8)
-        cur_res = np.clip(cur_res, 0, 255)
-        cur_res = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)  # Convert for OpenCV compatibility
+        cur_res = np.clip(cur_res * 255, 0, 255).astype('uint8')
+
+        # Convert from RGB to BGR (OpenCV default format)
+        cur_res = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
 
         return cur_res
