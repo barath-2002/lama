@@ -34,9 +34,18 @@ class ImageInpainter:
         :param checkpoint: Path to the model checkpoint file.
         :param config_path: Path to the Hydra configuration file.
         """
+        hydra.core.global_hydra.GlobalHydra.instance().clear()  
+        
+        config_dir = str(Path(config_path).parent) 
+        config_name = Path(config_path).name  
+        
+        hydra.initialize(config_path=config_dir)  
+        predict_config = hydra.compose(config_name=config_name)
+
+        # ✅ Convert config to standard Python dict for easy access
+        self.config = OmegaConf.to_container(predict_config, resolve=True)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Load the prediction config and ensure the model path is correctly set
         predict_config = hydra.compose(config_name=config_path)
         predict_config.model.path = model_path  # Correct model path
         predict_config.model.checkpoint = checkpoint  # Correct checkpoint file
