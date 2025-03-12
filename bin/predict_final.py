@@ -4,8 +4,6 @@ import numpy as np
 import cv2
 import torch
 import yaml
-import traceback
-from pathlib import Path
 from omegaconf import OmegaConf
 from saicinpainting.evaluation.utils import move_to_device
 from saicinpainting.training.trainers import load_checkpoint
@@ -16,10 +14,6 @@ os.environ['OPENBLAS_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
-
-# Directories
-OUTPUT_DIR = "/app/outputs/"
-os.makedirs(OUTPUT_DIR, exist_ok=True)  # Ensure output directory exists
 
 LOGGER = logging.getLogger(__name__)
 
@@ -54,67 +48,62 @@ class LaMaModel:
         self.model.to(self.device)  # Move model to GPU/CPU
         print("✅ Model loaded successfully!")
 
-        # Ensure we use the correct output key from config.yaml
+        # Ensure the correct output key is used
         if "evaluator" in train_config and hasattr(train_config.evaluator, "inpainted_key"):
-            self.inpainted_key = train_config.evaluator.inpainted_key
+            self.out_key = train_config.evaluator.inpainted_key
         else:
-            raise KeyError("❌ Missing `inpainted_key` in `train_config.evaluator`")
+            self.out_key = "inpainted"  # Default key
 
-    def predict_image(self, image_path, mask_path):
-        """Run the inpainting model, save results in `/app/outputs/`, and return output path."""
+    def predict_image(self, image, mask):
+        """Run the inpainting model on the given image and mask, ensuring they match in size."""
 
-        try:
-            # Load input image and mask
-            image = cv2.imread(image_path, cv2.IMREAD_COLOR)
-            mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        # Ensure image and mask are the same size
+        H, W, _ = image.shape
+        mask = cv2.resize(mask, (W, H), interpolation=cv2.INTER_NEAREST)  # Ensure same dimensions
 
-            if image is None or mask is None:
-                raise ValueError("❌ Failed to load input image or mask.")
+        # Convert image & mask to float32 for consistency
+        image = image.astype(np.float32)
+        mask = mask.astype(np.float32)
 
-            # Ensure image and mask are the same size
-            H, W, _ = image.shape
-            mask = cv2.resize(mask, (W, H), interpolation=cv2.INTER_NEAREST)  # Resize mask
+        # Ensure the mask has 3 dimensions (H, W, 1) like the image
+        if len(mask.shape) == 2:
+            mask = np.expand_dims(mask, axis=-1)  # Convert (H, W) -> (H, W, 1)
 
-            # Convert image & mask to float32
-            image = image.astype(np.float32)
-            mask = mask.astype(np.float32)
+        # Convert image & mask to PyTorch tensors
+        image_tensor = torch.from_numpy(image).permute(2, 0, 1).float().unsqueeze(0).to(self.device)  # (1, 3, H, W)
+        mask_tensor = torch.from_numpy(mask).permute(2, 0, 1).float().unsqueeze(0).to(self.device)  # (1, 1, H, W)
 
-            # Ensure mask has 3 dimensions (H, W, 1)
-            if len(mask.shape) == 2:
-                mask = np.expand_dims(mask, axis=-1)
+        batch = {
+            'image': image_tensor,
+            'mask': mask_tensor,
+        }
 
-            batch = {
-                'image': torch.from_numpy(image).permute(2, 0, 1).float().unsqueeze(0).to(self.device),  # (1, 3, H, W)
-                'mask': torch.from_numpy(mask).permute(2, 0, 1).float().unsqueeze(0).to(self.device),  # (1, 3, H, W)
-            }
+        with torch.no_grad():
+            batch = move_to_device(batch, self.device)  # Move to GPU/CPU
+            batch['mask'] = ((batch['mask'] > 0)).float().to(self.device)  # Ensure correct mask processing
+            batch = self.model(batch)  # Run inference
 
-            with torch.no_grad():
-                batch = move_to_device(batch, self.device)  # Move to GPU/CPU
-                batch['mask'] = ((batch['mask'] > 0)).float().to(self.device)  # Ensure correct mask processing
-                batch = self.model(batch)  # Run inference
+            # 🔥 DEBUG: Check available keys in batch
+            print(f"🔍 Available keys in batch output: {batch.keys()}")
 
-                # Use the correct output key (from config.yaml, not predict_config.out_key)
-                output_key = self.inpainted_key  
-                cur_res = batch[output_key][0].permute(1, 2, 0).detach().cpu().numpy()
+            # Ensure the output key exists
+            if self.out_key not in batch:
+                raise KeyError(f"❌ Expected output key '{self.out_key}' not found in model output. Available keys: {list(batch.keys())}")
 
-                # Handle unpadding if needed
-                unpad_to_size = batch.get('unpad_to_size', None)
-                if unpad_to_size is not None:
-                    orig_height, orig_width = unpad_to_size
-                    cur_res = cur_res[:orig_height, :orig_width]
+            # Retrieve the correct output tensor
+            cur_res = batch[self.out_key][0].permute(1, 2, 0).detach().cpu().numpy()
 
-            # Ensure correct scaling and format
-            cur_res = np.clip(cur_res * 255, 0, 255).astype('uint8')
+            # Handle unpadding if needed
+            unpad_to_size = batch.get('unpad_to_size', None)
+            if unpad_to_size is not None:
+                orig_height, orig_width = unpad_to_size
+                cur_res = cur_res[:orig_height, :orig_width]
 
-            # Convert from RGB to BGR (OpenCV format)
-            cur_res = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
+        # 🔥 Fix: Ensure the result is properly scaled and formatted
+        if cur_res.dtype != np.uint8:
+            cur_res = np.clip(cur_res * 255, 0, 255).astype(np.uint8)
 
-            # Save output image
-            output_path = os.path.join(OUTPUT_DIR, Path(image_path).stem + "_output.png")
-            cv2.imwrite(output_path, cur_res)
+        # 🔥 Fix: Convert from RGB to BGR (OpenCV format)
+        cur_res = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
 
-            return output_path  # Return path instead of deleting file
-
-        except Exception as ex:
-            LOGGER.critical(f"Prediction failed due to {ex}:\n{traceback.format_exc()}")
-            return {"error": f"Processing failed: {str(ex)}"}
+        return cur_res
