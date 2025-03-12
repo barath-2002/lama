@@ -19,7 +19,7 @@ LOGGER = logging.getLogger(__name__)
 class LaMaModel:
     _instance = None
 
-    def __new__(cls, model_path="/app/big-lama", checkpoint="fine-tuned_lama.ckpt"):
+    def __new__(cls, model_path="/content/drive/MyDrive/Magic Eraser/big-lama", checkpoint="fine-tuned_lama.ckpt"):
         if cls._instance is None:
             cls._instance = super(LaMaModel, cls).__new__(cls)
             cls._instance._load_model(model_path, checkpoint)
@@ -45,7 +45,7 @@ class LaMaModel:
         self.model.freeze()
         LOGGER.info("✅ LaMa Model Loaded Once and Ready!")
 
-    def predict(self, image_path, mask_path, output_path="/app/outputs/image_mask.png", refine=False):
+    def predict(self, image_path, mask_path, output_path="/content/outputs", refine=False):
         """Runs inference on a single image."""
         try:
             batch = self._prepare_input(image_path, mask_path)
