@@ -1,118 +1,109 @@
-#!/usr/bin/env python3
-
-import logging
 import os
+import logging
 import torch
-import cv2
 import yaml
+import hydra
+import tqdm
 import numpy as np
-import traceback
+import cv2
+from pathlib import Path
 from omegaconf import OmegaConf
 from torch.utils.data._utils.collate import default_collate
+
 from saicinpainting.evaluation.utils import move_to_device
 from saicinpainting.evaluation.refinement import refine_predict
+from saicinpainting.training.data.datasets import make_default_val_dataset
 from saicinpainting.training.trainers import load_checkpoint
+from saicinpainting.utils import register_debug_signal_handlers
 
 LOGGER = logging.getLogger(__name__)
 
-# ✅ Singleton Model Class (Loads Model Once)
-class LaMaModel:
-    _instance = None
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
-    def __new__(cls, model_path="/content/drive/MyDrive/Magic Eraser/big-lama", checkpoint="fine-tuned_lama.ckpt"):
-        if cls._instance is None:
-            cls._instance = super(LaMaModel, cls).__new__(cls)
-            cls._instance._load_model(model_path, checkpoint)
-        return cls._instance
 
-    def _load_model(self, model_path, checkpoint):
-        """Loads the model ONCE and stores it for reuse."""
+class ImageInpainter:
+    def __init__(self, model_path: str, checkpoint: str, config_path: str):
+        """
+        Initializes the ImageInpainter by loading the model.
+
+        :param model_path: Path to the trained model directory.
+        :param checkpoint: Path to the model checkpoint file.
+        :param config_path: Path to the Hydra configuration file.
+        """
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model_path = model_path
-      #  self.checkpoint_path = os.path.join(model_path, checkpoint)
 
-        # Load config correctly
-        train_config_path = os.path.join(model_path, "config.yaml")
-        with open(train_config_path, "r") as f:
+        # Load the prediction config and ensure the model path is correctly set
+        predict_config = hydra.compose(config_name=config_path)
+        predict_config.model.path = model_path  # Correct model path
+        predict_config.model.checkpoint = checkpoint  # Correct checkpoint file
+
+        self.predict_config = predict_config
+
+        # Load training config
+        train_config_path = os.path.join(model_path, 'config.yaml')
+        with open(train_config_path, 'r') as f:
             train_config = OmegaConf.create(yaml.safe_load(f))
 
         train_config.training_model.predict_only = True
-        train_config.visualizer.kind = "noop"
+        train_config.visualizer.kind = 'noop'
 
-        # Load model ONCE
-        self.model = load_checkpoint(train_config, self.checkpoint_path, strict=False, map_location=self.device)
-        self.model.to(self.device)
+        # Load the model checkpoint
+        checkpoint_path = os.path.join(model_path, 'models', checkpoint)
+        self.model = load_checkpoint(train_config, checkpoint_path, strict=False, map_location=self.device)
         self.model.freeze()
-        LOGGER.info("✅ LaMa Model Loaded Once and Ready!")
 
-    def predict(self, image_path, mask_path, output_path="/content/outputs", refine=False):
-        """Runs inference on a single image."""
+        if not predict_config.get('refine', False):
+            self.model.to(self.device)
+
+    def predict_batch(self, indir: str, outdir: str, out_ext: str = ".png"):
+        """
+        Processes a batch of images from a directory.
+
+        :param indir: Input directory containing images and masks.
+        :param outdir: Output directory to save inpainted images.
+        :param out_ext: File extension for output images.
+        """
         try:
-            batch = self._prepare_input(image_path, mask_path)
-        except ValueError as e:
-            LOGGER.error(f"❌ Error preparing input: {e}")
-            return None
+            if not indir.endswith('/'):
+                indir += '/'
 
-        with torch.no_grad():
-            batch = move_to_device(batch, self.device)
-            batch["mask"] = (batch["mask"] > 0).float().to(self.device)
+            dataset = make_default_val_dataset(indir, **self.predict_config.dataset)
+            os.makedirs(outdir, exist_ok=True)
 
-            if refine:
-                assert "unpad_to_size" in batch, "Unpadded size is required for refinement"
-                cur_res = refine_predict(batch, self.model)
-                cur_res = cur_res[0].permute(1, 2, 0).detach().cpu().numpy()
-            else:
-                batch = self.model(batch)
-                cur_res = batch["inpainted"][0].permute(1, 2, 0).detach().cpu().numpy()
+            for img_i in tqdm.trange(len(dataset)):
+                mask_fname = dataset.mask_filenames[img_i]
+                cur_out_fname = os.path.join(
+                    outdir, os.path.splitext(mask_fname[len(indir):])[0] + out_ext
+                )
+                os.makedirs(os.path.dirname(cur_out_fname), exist_ok=True)
 
-        cur_res = np.clip(cur_res * 255, 0, 255).astype("uint8")
-        cur_res = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(output_path, cur_res)
-        LOGGER.info(f"✅ Output saved at: {output_path}")
-        return output_path
+                batch = default_collate([dataset[img_i]])
 
-    def _prepare_input(self, image_path, mask_path):
-        """Prepares input image and mask as tensors."""
-        image = cv2.imread(image_path)
-        mask = cv2.imread(mask_path)
+                if self.predict_config.get('refine', False):
+                    assert 'unpad_to_size' in batch, "Unpadded size is required for the refinement"
+                    cur_res = refine_predict(batch, self.model, **self.predict_config.refiner)
+                    cur_res = cur_res[0].permute(1, 2, 0).detach().cpu().numpy()
+                else:
+                    with torch.no_grad():
+                        batch = move_to_device(batch, self.device)
+                        batch['mask'] = ((batch['mask'] > 0)).float().to(self.device)
+                        batch = self.model(batch)
+                        cur_res = batch[self.predict_config.out_key][0].permute(1, 2, 0).detach().cpu().numpy()
+                        unpad_to_size = batch.get('unpad_to_size', None)
+                        if unpad_to_size is not None:
+                            orig_height, orig_width = unpad_to_size
+                            cur_res = cur_res[:orig_height, :orig_width]
 
-        if image is None or mask is None:
-            raise ValueError(f"❌ Error loading image or mask: {image_path}, {mask_path}")
+                cur_res = np.clip(cur_res * 255, 0, 255).astype('uint8')
+                cur_res = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
+                cv2.imwrite(cur_out_fname, cur_res)
 
-        # ✅ Convert image from OpenCV BGR to RGB (if not already)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            LOGGER.info("Processing complete.")
 
-        # ✅ Ensure both image & mask are treated the SAME WAY
-        mask = np.transpose(mask, (2, 0, 1))  # Ensure (C, H, W)
-        image = np.transpose(image, (2, 0, 1))  # Ensure (C, H, W)
-
-        # Convert to tensors
-        image = torch.tensor(image, dtype=torch.float32)  # Shape (3, H, W)
-        mask = torch.tensor(mask, dtype=torch.float32)  # Shape (3, H, W)
-
-        # ✅ Use `default_collate()` for batching
-        batch = default_collate([{"image": image, "mask": mask}])
-
-        return batch
-
-
-if __name__ == "__main__":
-    LOGGER.info("🚀 Starting LaMa Inpainting Service...")
-
-    # ✅ Load Model ONCE
-    model = LaMaModel()
-
-    # ✅ Process images without blocking API requests
-    for line in sys.stdin:
-        try:
-            image_path, mask_path = line.strip().split()
-            LOGGER.info(f"Processing: {image_path}, {mask_path}")
-            output_path = model.predict(image_path, mask_path)
-
-            if output_path:
-                LOGGER.info(f"✅ Processing complete: {output_path}")
-            else:
-                LOGGER.error("❌ Processing failed.")
-
-        except Exception as ex:
-            LOGGER.error(f"❌ Error: {ex}\n{traceback.format_exc()}")
+        except Exception as e:
+            LOGGER.error(f"Prediction failed due to: {e}")
+            raise
