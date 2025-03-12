@@ -46,13 +46,13 @@ class LaMaModel:
         """Run the inpainting model on the given image and mask."""
 
         # Convert to tensors
-        image_tensor = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
-        mask_tensor = torch.from_numpy(mask).float()
+        image_tensor = torch.from_numpy(image).permute(2, 0, 1).float()  # Shape: (3, H, W)
+        mask_tensor = torch.from_numpy(mask).float().unsqueeze(0)  # Shape: (1, H, W)
 
-        # Add batch dimension
+         # Add batch dimension
         batch = {
-            'image': image_tensor.unsqueeze(0).to(self.device),
-            'mask': (mask_tensor.unsqueeze(0).to(self.device) > 0).float(),
+            'image': image_tensor.unsqueeze(0).to(self.device),  # Shape: (1, 3, H, W)
+            'mask': (mask_tensor.unsqueeze(0).to(self.device) > 0).float(),  # Shape: (1, 1, H, W)
         }
 
         with torch.no_grad():
