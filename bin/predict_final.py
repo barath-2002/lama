@@ -65,17 +65,10 @@ class LaMaModel:
         if len(mask.shape) == 2:
             mask = np.expand_dims(mask, axis=-1)  # Convert (H, W) -> (H, W, 1)
 
-        # Convert image & mask to PyTorch tensors
-        image_tensor = torch.from_numpy(image).permute(2, 0, 1).float().unsqueeze(0).to(self.device)  # (1, 3, H, W)
-        mask_tensor = torch.from_numpy(mask).permute(2, 0, 1).float().unsqueeze(0).to(self.device)  # (1, 1, H, W)
-
-        # Ensure both tensors have the same shape before passing to the model
-        if image_tensor.shape != mask_tensor.shape:
-            raise ValueError(f"❌ Shape mismatch: Image {image_tensor.shape}, Mask {mask_tensor.shape}")
 
         batch = {
-            'image': image_tensor,
-            'mask': mask_tensor,
+            'image': torch.from_numpy(image).permute(2, 0, 1).float().unsqueeze(0).to(self.device),  # (1, 3, H, W)
+            'mask': torch.from_numpy(mask).permute(2, 0, 1).float().unsqueeze(0).to(self.device),  # (1, 3, H, W)
         }
 
         with torch.no_grad():
