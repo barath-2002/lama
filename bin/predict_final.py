@@ -56,30 +56,31 @@ class LaMaModel:
             self.out_key = "inpainted"  # Default key
 
     def predict_image(self, image, mask):
-        # Ensure mask has the same number of channels as image (1-channel grayscale mask)
-        if len(mask.shape) == 2:
-            mask = np.expand_dims(mask, axis=-1)  # Convert (H, W) -> (H, W, 1)
-
-        # Wrap image and mask into a dictionary
+        """Ensure image and mask are in the correct shape before using `default_collate()`."""
+    
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # Convert BGR → RGB
+        image = np.transpose(image, (2, 0, 1))  # (H, W, C) → (C, H, W)
+    
+        if len(mask.shape) == 2:  # If grayscale (H, W), add a channel dimension
+            mask = np.expand_dims(mask, axis=0)  # (H, W) → (1, H, W)
+    
         sample = {'image': image, 'mask': mask}
-
-        # 🔥 Use default_collate() to handle tensor conversion automatically
-        batch = default_collate([sample])
-
+    
+        batch = default_collate([sample])  # Now batch will be (B, C, H, W)
+    
         with torch.no_grad():
             batch = move_to_device(batch, self.device)  # Move to GPU/CPU
             batch['mask'] = (batch['mask'] > 0).float().to(self.device)  # Ensure correct mask processing
             batch = self.model(batch)  # Run inference
-
+    
             # Ensure output key exists
             if self.out_key not in batch:
                 raise KeyError(f"❌ Expected output key '{self.out_key}' not found in model output.")
-
+    
             # Retrieve the correct output tensor
-            cur_res = batch[self.out_key][0].permute(1, 2, 0).detach().cpu().numpy()
-
-        # Convert to uint8 format and fix color channels
+            cur_res = batch[self.out_key][0].permute(1, 2, 0).detach().cpu().numpy()  # (C, H, W) → (H, W, C)
+    
         cur_res = np.clip(cur_res, 0, 255).astype(np.uint8)
-        cur_res = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)  # Convert from RGB to BGR (OpenCV format)
-        
+        cur_res = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
+    
         return cur_res
