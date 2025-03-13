@@ -8,6 +8,30 @@ import cv2
 from pathlib import Path
 from omegaconf import OmegaConf
 from torch.utils.data._utils.collate import default_collate
+import logging
+import os
+import sys
+import traceback
+
+# Add the logging configuration here
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+LOGGER = logging.getLogger(__name__)
+
+# Your existing imports and code below...
+import cv2
+import hydra
+import numpy as np
+import torch
+import tqdm
+import yaml
+from omegaconf import OmegaConf
+from torch.utils.data._utils.collate import default_collate
+from saicinpainting.training.data.datasets import make_default_val_dataset
+from saicinpainting.training.trainers import load_checkpoint
+from saicinpainting.utils import register_debug_signal_handlers
+
+# Your main function...
 
 from saicinpainting.evaluation.utils import move_to_device
 from saicinpainting.evaluation.refinement import refine_predict
