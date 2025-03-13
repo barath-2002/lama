@@ -1,23 +1,20 @@
 import os
 import logging
 import torch
-import yaml
-import hydra
-import tqdm
 import numpy as np
 import cv2
+import tqdm
 from pathlib import Path
-from omegaconf import OmegaConf
 from torch.utils.data._utils.collate import default_collate
 
 from saicinpainting.evaluation.utils import move_to_device
 from saicinpainting.evaluation.refinement import refine_predict
 from saicinpainting.training.data.datasets import make_default_val_dataset
 from saicinpainting.training.trainers import load_checkpoint
-from saicinpainting.utils import register_debug_signal_handlers
 
 LOGGER = logging.getLogger(__name__)
 
+# Set environment variables for performance optimization
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['OPENBLAS_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
@@ -26,46 +23,33 @@ os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
 
 class ImageInpainter:
-    def __init__(self, model_path: str, checkpoint: str, config_path: str):
+    def __init__(self, predict_config):
         """
         Initializes the ImageInpainter by loading the model.
 
-        :param model_path: Path to the trained model directory.
-        :param checkpoint: Path to the model checkpoint file.
-        :param config_path: Path to the Hydra configuration file.
+        :param predict_config: Configuration dictionary containing model details.
         """
-        hydra.core.global_hydra.GlobalHydra.instance().clear()  
-        
-        config_dir = str(Path(config_path).parent) 
-        config_name = Path(config_path).name  
-        
-        hydra.initialize(config_path=config_dir)  
-        predict_config = hydra.compose(config_name=config_name)
-
-        # ✅ Convert config to standard Python dict for easy access
-        self.config = OmegaConf.to_container(predict_config, resolve=True)
+        self.predict_config = predict_config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        predict_config = hydra.compose(config_name=config_path)
-        predict_config.model.path = model_path  # Correct model path
-        predict_config.model.checkpoint = checkpoint  # Correct checkpoint file
+        model_path = predict_config.model.path
+        checkpoint = predict_config.model.checkpoint
 
-        self.predict_config = predict_config
-
-        # Load training config
+        # ✅ Load training config
         train_config_path = os.path.join(model_path, 'config.yaml')
-        with open(train_config_path, 'r') as f:
-            train_config = OmegaConf.create(yaml.safe_load(f))
+        if not os.path.exists(train_config_path):
+            raise FileNotFoundError(f"Training config file not found at {train_config_path}")
 
-        train_config.training_model.predict_only = True
-        train_config.visualizer.kind = 'noop'
+        train_config = torch.load(train_config_path, map_location=self.device)
+        train_config['training_model']['predict_only'] = True
+        train_config['visualizer']['kind'] = 'noop'
 
-        # Load the model checkpoint
-        checkpoint_path = os.path.join(model_path, 'models', checkpoint)
+        # ✅ Load model checkpoint
+        checkpoint_path = os.path.join(model_path, checkpoint)
         self.model = load_checkpoint(train_config, checkpoint_path, strict=False, map_location=self.device)
         self.model.freeze()
 
-        if not predict_config.get('refine', False):
+        if not self.predict_config.get('refine', False):
             self.model.to(self.device)
 
     def predict_batch(self, indir: str, outdir: str, out_ext: str = ".png"):
@@ -77,9 +61,7 @@ class ImageInpainter:
         :param out_ext: File extension for output images.
         """
         try:
-            if not indir.endswith('/'):
-                indir += '/'
-
+            indir = indir.rstrip('/') + '/'  # Ensure trailing slash
             dataset = make_default_val_dataset(indir, **self.predict_config.dataset)
             os.makedirs(outdir, exist_ok=True)
 
@@ -93,13 +75,14 @@ class ImageInpainter:
                 batch = default_collate([dataset[img_i]])
 
                 if self.predict_config.get('refine', False):
-                    assert 'unpad_to_size' in batch, "Unpadded size is required for the refinement"
+                    if 'unpad_to_size' not in batch:
+                        raise ValueError("Refinement mode requires 'unpad_to_size' in batch.")
                     cur_res = refine_predict(batch, self.model, **self.predict_config.refiner)
                     cur_res = cur_res[0].permute(1, 2, 0).detach().cpu().numpy()
                 else:
                     with torch.no_grad():
                         batch = move_to_device(batch, self.device)
-                        batch['mask'] = ((batch['mask'] > 0)).float().to(self.device)
+                        batch['mask'] = (batch['mask'] > 0).float().to(self.device)
                         batch = self.model(batch)
                         cur_res = batch[self.predict_config.out_key][0].permute(1, 2, 0).detach().cpu().numpy()
                         unpad_to_size = batch.get('unpad_to_size', None)
@@ -115,4 +98,4 @@ class ImageInpainter:
 
         except Exception as e:
             LOGGER.error(f"Prediction failed due to: {e}")
-            raise
+            raise RuntimeError(f"Prediction failed due to: {e}")
