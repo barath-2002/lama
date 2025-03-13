@@ -57,50 +57,54 @@ class ImageInpainter:
             self.model.to(self.device)
 
     def predict_batch(self, indir: str, outdir: str, out_ext: str = ".png"):
-        """
-        Processes a batch of images from a directory.
+    """
+    Processes a batch of images from a directory.
 
-        :param indir: Input directory containing images and masks.
-        :param outdir: Output directory to save inpainted images.
-        :param out_ext: File extension for output images.
-        """
-        try:
-            if not indir.endswith('/'):
-                indir += '/'
+    :param indir: Input directory containing images and masks.
+    :param outdir: Output directory to save inpainted images.
+    :param out_ext: File extension for output images.
+    """
+    try:
+        if not indir.endswith('/'):
+            indir += '/'
 
-            dataset = make_default_val_dataset(indir, **self.predict_config.dataset)
-            os.makedirs(outdir, exist_ok=True)
+        # Load dataset using the config
+        dataset = make_default_val_dataset(indir, **self.predict_config.dataset)
+        os.makedirs(outdir, exist_ok=True)
 
-            for img_i in tqdm.trange(len(dataset)):
-                mask_fname = dataset.mask_filenames[img_i]
-                cur_out_fname = os.path.join(
-                    outdir, os.path.splitext(mask_fname[len(indir):])[0] + out_ext
-                )
-                os.makedirs(os.path.dirname(cur_out_fname), exist_ok=True)
+        for img_i in tqdm.trange(len(dataset)):
+            # Ensure we're accessing the correct mask filename
+            mask_fname = dataset.mask_filenames[img_i]
+            cur_out_fname = os.path.join(
+                outdir, os.path.splitext(mask_fname[len(indir):])[0] + out_ext
+            )
+            os.makedirs(os.path.dirname(cur_out_fname), exist_ok=True)
 
-                batch = default_collate([dataset[img_i]])
+            # Collect the batch from the dataset
+            batch = default_collate([dataset[img_i]])
 
-                if self.predict_config.get('refine', False):
-                    assert 'unpad_to_size' in batch, "Unpadded size is required for the refinement"
-                    cur_res = refine_predict(batch, self.model, **self.predict_config.refiner)
-                    cur_res = cur_res[0].permute(1, 2, 0).detach().cpu().numpy()
-                else:
-                    with torch.no_grad():
-                        batch = move_to_device(batch, self.device)
-                        batch['mask'] = ((batch['mask'] > 0)).float().to(self.device)
-                        batch = self.model(batch)
-                        cur_res = batch[self.predict_config.out_key][0].permute(1, 2, 0).detach().cpu().numpy()
-                        unpad_to_size = batch.get('unpad_to_size', None)
-                        if unpad_to_size is not None:
-                            orig_height, orig_width = unpad_to_size
-                            cur_res = cur_res[:orig_height, :orig_width]
+            # Handle refinement if enabled
+            if self.predict_config.get('refine', False):
+                assert 'unpad_to_size' in batch, "Unpadded size is required for the refinement"
+                cur_res = refine_predict(batch, self.model, **self.predict_config.refiner)
+                cur_res = cur_res[0].permute(1, 2, 0).detach().cpu().numpy()
+            else:
+                with torch.no_grad():
+                    batch = move_to_device(batch, self.device)
+                    batch['mask'] = ((batch['mask'] > 0)).float().to(self.device)
+                    batch = self.model(batch)
+                    cur_res = batch[self.predict_config.out_key][0].permute(1, 2, 0).detach().cpu().numpy()
+                    unpad_to_size = batch.get('unpad_to_size', None)
+                    if unpad_to_size is not None:
+                        orig_height, orig_width = unpad_to_size
+                        cur_res = cur_res[:orig_height, :orig_width]
 
-                cur_res = np.clip(cur_res * 255, 0, 255).astype('uint8')
-                cur_res = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
-                cv2.imwrite(cur_out_fname, cur_res)
+            # Save the inpainted result
+            cur_res = np.clip(cur_res * 255, 0, 255).astype('uint8')
+            cur_res = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(cur_out_fname, cur_res)
 
-            LOGGER.info("Processing complete.")
-
-        except Exception as e:
-            LOGGER.error(f"Prediction failed due to: {e}")
-            raise
+        LOGGER.info("Processing complete.")
+    except Exception as e:
+        LOGGER.error(f"Error processing batch: {e}")
+        raise e
