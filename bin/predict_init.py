@@ -36,7 +36,7 @@ def main(predict_config: OmegaConf):
     try:
         register_debug_signal_handlers()  # kill -10 <pid> will result in traceback dumped into log
 
-        device = torch.device(predict_config.device)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Load the model only if it has not been loaded yet
         if loaded_model is None:
@@ -74,7 +74,7 @@ def main(predict_config: OmegaConf):
                 os.makedirs(os.path.dirname(cur_out_fname), exist_ok=True)
 
                 batch = move_to_device(default_collate([dataset[img_i]]), device)
-                batch['mask'] = (batch['mask'] > 0) * 1
+                batch['mask'] = ((batch['mask']>0)).float().to(device)
                 batch = loaded_model(batch)  # Use the preloaded model
                 cur_res = batch[predict_config.out_key][0].permute(1, 2, 0).detach().cpu().numpy()
 
