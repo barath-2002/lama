@@ -22,35 +22,40 @@ LOGGER = logging.getLogger(__name__)
 # Global variable to store the model
 loaded_model = None
 
-@hydra.main(config_path='../configs/prediction', config_name='default.yaml')
-def main(predict_config: OmegaConf):
+# Singleton pattern to ensure the model is only loaded once
+def get_model(predict_config: OmegaConf):
     global loaded_model  # Use the global model variable
 
+    if loaded_model is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Load the model only if it has not been loaded yet
+        train_config_path = os.path.join(predict_config.model.path, 'config.yaml')
+        with open(train_config_path, 'r') as f:
+            train_config = OmegaConf.create(yaml.safe_load(f))
+
+        train_config.training_model.predict_only = True
+        train_config.visualizer.kind = 'noop'
+
+        out_ext = predict_config.get('out_ext', '.png')
+
+        checkpoint_path = os.path.join(predict_config.model.path,
+                                       'models',
+                                       predict_config.model.checkpoint)
+        loaded_model = load_checkpoint(train_config, checkpoint_path, strict=False, map_location=device)
+        loaded_model.freeze()
+        loaded_model.to(device)
+        LOGGER.info("Model loaded successfully.")
+
+    return loaded_model
+
+@hydra.main(config_path='../configs/prediction', config_name='default.yaml')
+def main(predict_config: OmegaConf):
     try:
         register_debug_signal_handlers()  # kill -10 <pid> will result in traceback dumped into log
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        # Load the model only if it has not been loaded yet
-        if loaded_model is None:
-            train_config_path = os.path.join(predict_config.model.path, 'config.yaml')
-            with open(train_config_path, 'r') as f:
-                train_config = OmegaConf.create(yaml.safe_load(f))
-
-            train_config.training_model.predict_only = True
-            train_config.visualizer.kind = 'noop'
-
-            out_ext = predict_config.get('out_ext', '.png')
-
-            checkpoint_path = os.path.join(predict_config.model.path, 
-                                           'models', 
-                                           predict_config.model.checkpoint)
-            loaded_model = load_checkpoint(train_config, checkpoint_path, strict=False, map_location=device)
-            loaded_model.freeze()
-            loaded_model.to(device)
-            LOGGER.info("Model loaded successfully.")
-        else:
-            LOGGER.info("Using preloaded model.")
+        loaded_model = get_model(predict_config)  # Get the singleton model
 
         if not predict_config.indir.endswith('/'):
             predict_config.indir += '/'
@@ -61,13 +66,13 @@ def main(predict_config: OmegaConf):
             for img_i in tqdm.trange(len(dataset)):
                 mask_fname = dataset.mask_filenames[img_i]
                 cur_out_fname = os.path.join(
-                    predict_config.outdir, 
-                    os.path.splitext(mask_fname[len(predict_config.indir):])[0] + out_ext
+                    predict_config.outdir,
+                    os.path.splitext(mask_fname[len(predict_config.indir):])[0] + predict_config.get('out_ext', '.png')
                 )
                 os.makedirs(os.path.dirname(cur_out_fname), exist_ok=True)
 
                 batch = move_to_device(default_collate([dataset[img_i]]), device)
-                batch['mask'] = ((batch['mask']>0)).float().to(device)
+                batch['mask'] = ((batch['mask'] > 0)).float().to(device)
                 batch = loaded_model(batch)  # Use the preloaded model
                 cur_res = batch[predict_config.out_key][0].permute(1, 2, 0).detach().cpu().numpy()
 
