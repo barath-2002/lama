@@ -52,7 +52,7 @@ def main(predict_config: OmegaConf):
             checkpoint_path = os.path.join(predict_config.model.path, 
                                            'models', 
                                            predict_config.model.checkpoint)
-            loaded_model = load_checkpoint(train_config, checkpoint_path, strict=False, map_location='cpu')
+            loaded_model = load_checkpoint(train_config, checkpoint_path, strict=False, map_location=device)
             loaded_model.freeze()
             loaded_model.to(device)
             LOGGER.info("Model loaded successfully.")
